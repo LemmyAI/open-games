@@ -1,329 +1,566 @@
-# Open Games - Specification v0.2
+# Open Games - Specification v0.3
 
 ## Overview
 
-Open Games is an open-source game platform where games are written in TypeScript/JavaScript and communicate entirely over LiveKit DataChannels. No WebSocket, no custom networking - just LiveKit for everything.
+Open Games is a **LiveKit networking plugin for Phaser** (and other game frameworks). We provide the multiplayer layer - you bring the game engine.
+
+**Stop rebuilding game engines.** Focus on what's unique: making LiveKit the best multiplayer transport for web games.
 
 ## Philosophy
 
-- **One protocol** - All communication over LiveKit DataChannel
-- **Browser-first** - Games run in browser or Electron
-- **TypeScript** - Type-safe game development
-- **LiveKit-native** - Voice, video, and data all through one SDK
+- **Plugin, not platform** - Enhance existing engines, don't replace them
+- **LiveKit for networking** - Voice, video, and game state in one SDK
+- **Get working fast** - Multiplayer in < 20 lines of code
+- **Validate first** - Prove the approach before expanding
 
-## Repository Structure
+## What We Build
+
+```
+@opengames/livekit-phaser    # Phaser 3 plugin
+@opengames/livekit-three     # Three.js helper (future)
+@opengames/protocols         # Shared protocol definitions
+@opengames/cli               # Dev tools
+
+NOT building:
+- Game engine (Phaser exists)
+- Physics engine (Matter.js, Rapier exist)
+- Rendering engine (PixiJS, Three.js exist)
+- Asset pipeline (Vite, esbuild exist)
+```
+
+## Quick Start
+
+```typescript
+import Phaser from 'phaser';
+import { LiveKitPlugin, createRoom } from '@opengames/livekit-phaser';
+
+// Your game config
+const config = {
+  type: Phaser.AUTO,
+  width: 800,
+  height: 600,
+  scene: GameScene
+};
+
+// Add multiplayer - that's it!
+const game = new Phaser.Game(config);
+game.plugins.install('LiveKitPlugin', LiveKitPlugin, true);
+
+// In your scene
+class GameScene extends Phaser.Scene {
+  create() {
+    // Connect to room
+    this.livekit = this.plugins.get('LiveKitPlugin');
+    this.livekit.connect('my-room', token);
+    
+    // Sync player position automatically
+    this.livekit.syncPosition(this.player, { 
+      interpolate: true,
+      prediction: true 
+    });
+  }
+}
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Your Game                         │
+│   (Phaser scene, sprites, game logic)               │
+└─────────────────────┬───────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────┐
+│            @opengames/livekit-phaser                 │
+│                                                      │
+│   ┌─────────────┐  ┌─────────────┐  ┌────────────┐ │
+│   │ Position    │  │ State       │  │ Voice/     │ │
+│   │ Sync        │  │ Sync        │  │ Video      │ │
+│   │ (Interp)    │  │ (Reliable)  │  │ (Built-in) │ │
+│   └──────┬──────┘  └──────┬──────┘  └─────┬──────┘ │
+│          │                │                │        │
+│   ┌──────▼────────────────▼────────────────▼──────┐│
+│   │              LiveKit SDK                       ││
+│   │         (DataChannels + Media)                ││
+│   └───────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────┘
+                      │
+              ┌───────▼───────┐
+              │  LiveKit Cloud │
+              │  or Self-Host  │
+              └───────────────┘
+```
+
+## Package Structure
 
 ```
 open-games/
-├── games/                  # Open game implementations
-│   ├── pong/
-│   ├── chess/
-│   └── party-games/
-├── sdk/                    # Game Development SDK
-│   ├── core/               # Core game loop, state management
-│   ├── livekit/            # LiveKit integration, protocols
-│   ├── input/              # Input handling (keyboard, gamepad)
-│   ├── renderer/           # 2D/3D rendering (WebGL, WebGPU)
-│   └── audio/              # Audio engine
-├── protocols/              # Protocol definitions
-│   ├── game.proto          # Game state/input protocol
-│   ├── chat.proto          # Chat protocol
-│   ├── match.proto         # Matchmaking protocol
-│   └── voice.proto         # Voice events
-├── devtools/               # Developer tools
-│   ├── asset-packer/       # Asset bundling
-│   ├── game-compiler/      # Build system
-│   ├── debugger/           # In-game debug overlay
-│   └── templates/          # Game starter templates
-├── docs/                   # Documentation
-└── examples/               # Example games
+├── packages/
+│   ├── livekit-phaser/        # Phaser 3 plugin
+│   │   ├── src/
+│   │   │   ├── Plugin.ts      # Main plugin class
+│   │   │   ├── PositionSync.ts
+│   │   │   ├── StateSync.ts
+│   │   │   └── index.ts
+│   │   └── package.json
+│   │
+│   ├── protocols/             # Shared protocols
+│   │   ├── proto/
+│   │   │   ├── position.proto
+│   │   │   └── state.proto
+│   │   ├── src/
+│   │   │   ├── encode.ts
+│   │   │   └── decode.ts
+│   │   └── package.json
+│   │
+│   └── cli/                   # Dev tools
+│       ├── src/
+│       │   ├── dev.ts         # Local dev server
+│       │   └── token.ts       # Generate test tokens
+│       └── package.json
+│
+├── examples/
+│   ├── pong/                  # Minimal Pong
+│   └── movement/              # Just two squares moving
+│
+└── docs/
+    └── getting-started.md
 ```
 
-## SDK Components
+## Core Features
 
-### @opengames/sdk-core
-Core game engine functionality:
-- Game loop (fixed timestep, variable render)
-- State management
-- Entity-component system
-- Scene management
+### 1. Position Sync
 
-### @opengames/sdk-livekit
-LiveKit integration:
-- Room connection
-- DataChannel management
-- Protocol encoding/decoding
-- Participant handling
+Automatic position synchronization with interpolation and prediction:
 
 ```typescript
-import { Game, DataChannel } from '@opengames/sdk';
+// packages/livekit-phaser/src/PositionSync.ts
 
-class MyGame extends Game {
-  async onJoin(roomId: string, token: string) {
-    // Connect to LiveKit room
-    await this.connect(roomId, token);
+export interface PositionSyncOptions {
+  interpolate?: boolean;    // Smooth other players
+  prediction?: boolean;     // Predict local movement
+  sendRate?: number;        // Updates per second (default: 20)
+  deadReckoning?: boolean;  // Continue movement during lag
+}
+
+export class PositionSync {
+  private localPlayer: Phaser.GameObjects.Sprite;
+  private remotePlayers: Map<string, RemotePlayer>;
+  private unconfirmedInputs: Input[] = [];
+  
+  constructor(
+    private plugin: LiveKitPlugin,
+    private options: PositionSyncOptions = {}
+  ) {}
+  
+  // Sync this sprite's position to other players
+  sync(sprite: Phaser.GameObjects.Sprite, playerId: string) {
+    this.localPlayer = sprite;
     
-    // Create reliable channel for events
-    this.eventChannel = this.createDataChannel('events', {
-      ordered: true,
-      reliable: true
-    });
-    
-    // Create unreliable channel for fast updates
-    this.stateChannel = this.createDataChannel('state', {
-      ordered: false,
-      reliable: false
+    // Listen for position updates from others
+    this.plugin.onData('position', (data, from) => {
+      this.updateRemotePlayer(from, data);
     });
   }
   
-  onPlayerInput(input: PlayerInput) {
-    // Send unreliably for speed
-    this.stateChannel.send(encodePlayerInput(input));
+  update() {
+    if (!this.localPlayer) return;
+    
+    // Send local position (unreliable, fast)
+    if (this.shouldSend()) {
+      this.plugin.sendUnreliable('position', {
+        x: this.localPlayer.x,
+        y: this.localPlayer.y,
+        rotation: this.localPlayer.rotation,
+        timestamp: Date.now()
+      });
+    }
+    
+    // Interpolate remote players
+    if (this.options.interpolate) {
+      this.interpolateRemotes();
+    }
+  }
+  
+  // Client-side prediction
+  predict(input: Input) {
+    // Apply locally immediately
+    this.localPlayer.x += input.dx;
+    this.localPlayer.y += input.dy;
+    
+    // Store for reconciliation
+    this.unconfirmedInputs.push(input);
+    
+    // Send to server
+    this.plugin.sendUnreliable('input', input);
+  }
+  
+  // Server correction
+  reconcile(authoritativePos: Position) {
+    // Snap to server position
+    this.localPlayer.x = authoritativePos.x;
+    this.localPlayer.y = authoritativePos.y;
+    
+    // Re-apply unconfirmed inputs
+    for (const input of this.unconfirmedInputs) {
+      this.localPlayer.x += input.dx;
+      this.localPlayer.y += input.dy;
+    }
+    
+    // Clear confirmed
+    this.unconfirmedInputs = this.unconfirmedInputs.filter(
+      i => i.sequence > authoritativePos.lastSequence
+    );
   }
 }
 ```
 
-### @opengames/sdk-input
-Input handling:
-- Keyboard state
-- Gamepad support
-- Touch controls
-- Input mapping
+### 2. State Sync
 
-### @opengames/sdk-renderer
-Rendering:
-- Sprite batch rendering
-- WebGL2 backend
-- WebGPU (when available)
-- Particle systems
-- Shader management
+Reliable state for game events, scores, health:
 
-### @opengames/sdk-audio
-Audio engine:
-- Sound effects
-- Music streaming
-- 3D positional audio
-- Voice integration (via LiveKit)
+```typescript
+// packages/livekit-phaser/src/StateSync.ts
+
+export class StateSync {
+  constructor(private plugin: LiveKitPlugin) {}
+  
+  // Sync game state reliably
+  set(key: string, value: any) {
+    this.plugin.sendReliable('state', { key, value });
+  }
+  
+  // Listen for state changes
+  on(key: string, callback: (value: any) => void) {
+    this.plugin.onData('state', (data) => {
+      if (data.key === key) callback(data.value);
+    });
+  }
+  
+  // Request full state (for late joiners)
+  requestFullState() {
+    this.plugin.sendReliable('request-state', {});
+  }
+}
+```
+
+### 3. Room Management
+
+```typescript
+// packages/livekit-phaser/src/Plugin.ts
+
+export class LiveKitPlugin extends Phaser.Plugins.BasePlugin {
+  private room: Room | null = null;
+  private dataChannels: Map<string, DataChannel> = new Map();
+  
+  async connect(roomName: string, token: string) {
+    this.room = new Room();
+    
+    // Connect to LiveKit
+    await this.room.connect('wss://your-livekit-server.com', token);
+    
+    // Create data channels
+    await this.setupDataChannels();
+    
+    // Ready!
+    this.emit('connected');
+  }
+  
+  private async setupDataChannels() {
+    // Unreliable for positions
+    const positionChannel = await this.room.localParticipant.publishData(
+      new Uint8Array(),
+      DataPacket_Kind.LOSSY
+    );
+    this.dataChannels.set('position', positionChannel);
+    
+    // Reliable for state
+    const stateChannel = await this.room.localParticipant.publishData(
+      new Uint8Array(),
+      DataPacket_Kind.RELIABLE
+    );
+    this.dataChannels.set('state', stateChannel);
+  }
+  
+  sendUnreliable(topic: string, data: any) {
+    const channel = this.dataChannels.get(topic);
+    if (channel) {
+      channel.send(this.encode(topic, data));
+    }
+  }
+  
+  sendReliable(topic: string, data: any) {
+    this.room.localParticipant.publishData(
+      this.encode(topic, data),
+      DataPacket_Kind.RELIABLE
+    );
+  }
+  
+  onData(topic: string, callback: (data: any, from: string) => void) {
+    this.room.on('data-received', (payload, participant) => {
+      const decoded = this.decode(payload);
+      if (decoded.topic === topic) {
+        callback(decoded.data, participant.identity);
+      }
+    });
+  }
+  
+  // Voice/video built-in!
+  async publishMicrophone() {
+    await this.room.localParticipant.setMicrophoneEnabled(true);
+  }
+  
+  async publishCamera() {
+    await this.room.localParticipant.setCameraEnabled(true);
+  }
+}
+```
 
 ## Protocol Definitions
 
-### Game Protocol
 ```protobuf
+// packages/protocols/proto/position.proto
 syntax = "proto3";
 
 package opengames;
 
-// Player input (sent frequently, unreliable)
-message PlayerInput {
-  uint32 sequence = 1;
-  uint32 timestamp = 2;
-  repeated InputAction actions = 3;
+message Position {
+    uint32 sequence = 1;
+    uint64 timestamp = 2;
+    string player_id = 3;
+    float x = 4;
+    float y = 5;
+    float rotation = 6;
+    float velocity_x = 7;
+    float velocity_y = 8;
 }
 
-message InputAction {
-  uint32 action_id = 1;    // JUMP, SHOOT, MOVE, etc.
-  float value = 2;          // 0.0 - 1.0 or -1.0 - 1.0
-  float x = 3;              // Direction/vector
-  float y = 4;
+// packages/protocols/proto/state.proto
+message StateUpdate {
+    string key = 1;
+    bytes value = 2;
+    uint64 timestamp = 3;
 }
 
-// Game state (broadcast by authority)
-message GameState {
-  uint32 tick = 1;
-  uint32 timestamp = 2;
-  repeated EntityState entities = 3;
-}
-
-message EntityState {
-  uint32 entity_id = 1;
-  float x = 2;
-  float y = 3;
-  float rotation = 4;
-  uint32 state_flags = 5;   // Animation, status effects
+message Input {
+    uint32 sequence = 1;
+    uint64 timestamp = 2;
+    float dx = 3;
+    float dy = 4;
+    repeated uint32 actions = 5;
 }
 ```
 
-### Chat Protocol
-```protobuf
-syntax = "proto3";
+## Examples
 
-package opengames;
+### Example 1: Movement Only (Simplest)
 
-message ChatMessage {
-  string from_participant = 1;
-  string text = 2;
-  uint64 timestamp = 3;
-  ChatType type = 4;
-}
+Just two squares that can see each other move:
 
-enum ChatType {
-  CHAT_ROOM = 0;
-  CHAT_PRIVATE = 1;
-  CHAT_SYSTEM = 2;
-}
-```
+```typescript
+// examples/movement/src/main.ts
+import Phaser from 'phaser';
+import { LiveKitPlugin } from '@opengames/livekit-phaser';
 
-### Match Protocol
-```protobuf
-syntax = "proto3";
+const config = {
+  type: Phaser.AUTO,
+  width: 800,
+  height: 600,
+  scene: MovementScene
+};
 
-package opengames;
+const game = new Phaser.Game(config);
+game.plugins.install('LiveKitPlugin', LiveKitPlugin, true);
 
-message MatchEvent {
-  oneof event {
-    MatchJoin join = 1;
-    MatchLeave leave = 2;
-    MatchStart start = 3;
-    MatchEnd end = 4;
-    PlayerList players = 5;
+class MovementScene extends Phaser.Scene {
+  create() {
+    // My square
+    this.me = this.add.rectangle(400, 300, 32, 32, 0x00ff00);
+    this.cursors = this.input.keyboard.createCursorKeys();
+    
+    // Other players
+    this.others = {};
+    
+    // Connect
+    const token = getYourToken(); // From your backend
+    const livekit = this.plugins.get('LiveKitPlugin');
+    livekit.connect('room-1', token);
+    
+    // Sync my position
+    livekit.onData('position', (data, from) => {
+      if (!this.others[from]) {
+        this.others[from] = this.add.rectangle(0, 0, 32, 32, 0xff0000);
+      }
+      this.others[from].setPosition(data.x, data.y);
+    });
+  }
+  
+  update() {
+    const speed = 5;
+    let moved = false;
+    
+    if (this.cursors.left.isDown) { this.me.x -= speed; moved = true; }
+    if (this.cursors.right.isDown) { this.me.x += speed; moved = true; }
+    if (this.cursors.up.isDown) { this.me.y -= speed; moved = true; }
+    if (this.cursors.down.isDown) { this.me.y += speed; moved = true; }
+    
+    if (moved) {
+      const livekit = this.plugins.get('LiveKitPlugin');
+      livekit.sendUnreliable('position', {
+        x: this.me.x,
+        y: this.me.y
+      });
+    }
   }
 }
+```
 
-message MatchJoin {
-  string participant_id = 1;
-  string display_name = 2;
-  PlayerStats stats = 3;
+### Example 2: Pong
+
+Full Pong game with scoring:
+
+```typescript
+// examples/pong/src/main.ts
+import Phaser from 'phaser';
+import { LiveKitPlugin } from '@opengames/livekit-phaser';
+
+class PongScene extends Phaser.Scene {
+  create() {
+    // Game objects
+    this.paddle1 = this.add.rectangle(50, 300, 16, 100, 0xffffff);
+    this.paddle2 = this.add.rectangle(750, 300, 16, 100, 0xffffff);
+    this.ball = this.add.rectangle(400, 300, 16, 16, 0xffffff);
+    
+    this.score1 = this.add.text(200, 50, '0', { fontSize: '48px' });
+    this.score2 = this.add.text(600, 50, '0', { fontSize: '48px' });
+    
+    // Connect
+    const livekit = this.plugins.get('LiveKitPlugin');
+    livekit.connect('pong-' + this.gameId, this.token);
+    
+    // I'm player 1 or 2?
+    livekit.on('player-assigned', (num) => {
+      this.myPaddle = num === 1 ? this.paddle1 : this.paddle2;
+      this.myY = num === 1 ? 'paddle1Y' : 'paddle2Y';
+    });
+    
+    // Sync paddle positions
+    livekit.onData('position', (data) => {
+      if (data.paddle === 1) this.paddle1.y = data.y;
+      if (data.paddle === 2) this.paddle2.y = data.y;
+    });
+    
+    // Sync ball (player 1 is authoritative)
+    livekit.onData('ball', (data) => {
+      this.ball.x = data.x;
+      this.ball.y = data.y;
+      this.ball.vx = data.vx;
+      this.ball.vy = data.vy;
+    });
+    
+    // Sync score (reliable)
+    livekit.onData('state', (data) => {
+      if (data.key === 'score') {
+        this.score1.setText(data.value.p1);
+        this.score2.setText(data.value.p2);
+      }
+    });
+  }
+  
+  update() {
+    // Move my paddle
+    if (this.cursors.up.isDown) this.myPaddle.y -= 5;
+    if (this.cursors.down.isDown) this.myPaddle.y += 5;
+    
+    // Send position
+    livekit.sendUnreliable('position', {
+      paddle: this.myPaddle === this.paddle1 ? 1 : 2,
+      y: this.myPaddle.y
+    });
+  }
 }
-
-message PlayerList {
-  repeated PlayerInfo players = 1;
-}
 ```
 
-## Game Format
+## CLI Tools
 
-Games are packaged as modules:
-
-```
-my-game/
-├── game.json           # Game manifest
-├── index.ts            # Game entry point
-├── assets/
-│   ├── sprites/
-│   ├── audio/
-│   └── fonts/
-└── scenes/
-    ├── menu.ts
-    ├── game.ts
-    └── results.ts
-```
-
-### game.json
-```json
-{
-  "id": "com.example.mygame",
-  "name": "My Awesome Game",
-  "version": "1.0.0",
-  "minPlayers": 2,
-  "maxPlayers": 8,
-  "gameMode": "competitive|cooperative|party",
-  "requiresAuthority": true,
-  "tickRate": 20,
-  "protocols": ["game", "chat"]
-}
-```
-
-## DataChannel Types
-
-| Channel | Mode | Use Case |
-|---------|------|----------|
-| `state` | Unreliable, unordered | Player positions, movement |
-| `events` | Reliable, ordered | Game events, chat |
-| `input` | Unreliable, ordered | Player input |
-| `voice` | Built-in LiveKit | Voice chat |
-| `video` | Built-in LiveKit | Video streams |
-
-## Integration with GameServer
-
-1. **Get LiveKit token** from GameServer API (HTTP)
-2. **Connect to LiveKit room** using token
-3. **All game communication** happens over DataChannels
-4. **Server is a participant** - can be authoritative or observer
-
-```
-┌─────────────┐
-│  GameServer │ ←── HTTP: auth, stats, leaderboards
-│    API      │
-└──────┬──────┘
-       │ issues token
-       ▼
-┌─────────────┐
-│   LiveKit   │ ←── All game traffic
-│   Cloud     │
-└──────┬──────┘
-       │
-  ┌────┼────┐
-  ▼    ▼    ▼
-[P1] [P2] [Server]
-```
-
-## DevTools
-
-### Asset Packer
-- Texture atlas generation
-- Audio encoding (OGG, MP3, WAV)
-- Font bitmap generation
-- JSON manifest output
-
-### Game Compiler
-- TypeScript → JavaScript bundling
-- Tree shaking for smaller bundles
-- Source maps for debugging
-- Hot reload for development
-
-### Debugger
-- Live state inspector
-- Network traffic monitor (DataChannel)
-- Performance overlay
-- Entity inspector
-
-### Templates
 ```bash
-# Create new game from template
-npx create-open-game --template=2d-multiplayer my-game
+# Start local dev with LiveKit
+npx @opengames/cli dev
 
-# Available templates
-- 2d-multiplayer    # 2D competitive game
-- 3d-multiplayer    # 3D game with WebGL
-- party-game        # Turn-based party game
-- puzzle-game       # Cooperative puzzle
+# Generate test token for testing
+npx @opengames/cli token --room my-room --player player1
+
+# Run example
+npx @opengames/cli example movement
 ```
+
+## Success Metrics (v0.3)
+
+- [ ] Two players can see each other move in movement example
+- [ ] Latency feels acceptable (< 100ms perceived lag)
+- [ ] Pong is playable
+- [ ] Voice chat works in examples
+- [ ] Documentation gets someone started in < 5 minutes
 
 ## Tech Stack
 
-- **Language**: TypeScript
-- **Runtime**: Browser / Bun / Electron
-- **Rendering**: WebGL2 / WebGPU
-- **Audio**: Web Audio API
-- **Networking**: LiveKit SDK
-- **Protocol**: Protocol Buffers / MessagePack
+| Component | Technology |
+|-----------|------------|
+| **Game Engine** | Phaser 3 (user provides) |
+| **Networking** | LiveKit SDK |
+| **Protocols** | Protocol Buffers (optional, JSON first) |
+| **Build** | Vite |
+| **Package** | Turborepo |
 
 ## Version Goals
 
-### v0.2 (Current)
-- [ ] SDK core with game loop
-- [ ] LiveKit integration
-- [ ] Protocol definitions
-- [ ] Basic 2D rendering
-- [ ] One example game (Pong)
+### v0.3 (Current) - Validate the Concept
+- [ ] LiveKit plugin for Phaser
+- [ ] Position sync with interpolation
+- [ ] Movement example (two squares)
+- [ ] Pong example
+- [ ] Basic CLI
 
-### v0.3
-- [ ] Asset pipeline
-- [ ] Input system
-- [ ] Audio system
-- [ ] DevTools CLI
+### v0.4 - Make it Usable
+- [ ] Client prediction
+- [ ] State sync API
+- [ ] Better docs
+- [ ] Token generation helper
 
-### v1.0
-- [ ] Full SDK
-- [ ] 3+ example games
-- [ ] Documentation
-- [ ] Templates
+### v1.0 - Production Ready
+- [ ] Three.js support
+- [ ] Performance optimizations
+- [ ] Full protocol buffer support
+- [ ] Server authority helper
+
+## What We're NOT Building
+
+| Feature | Why Not | Use Instead |
+|---------|---------|-------------|
+| Game engine | Phaser, PixiJS exist | Phaser 3 |
+| Physics | Matter.js, Rapier exist | Matter.js |
+| Asset pipeline | Vite, esbuild exist | Vite |
+| UI framework | React, Vue exist | Your choice |
+| Animation system | Phaser has one | Phaser's |
+| 3D renderer | Three.js exists | Three.js |
+
+## Key Changes from v0.2
+
+| Aspect | v0.2 | v0.3 |
+|--------|------|------|
+| **Scope** | Full game platform | Phaser plugin |
+| **Engine** | Custom SDK | Use Phaser |
+| **Focus** | Build everything | Just networking |
+| **First goal** | Full SDK | Two moving squares |
+| **Physics** | Custom | Use existing |
+| **Rendering** | Custom WebGL | Use Phaser |
 
 ## License
 
-MIT License - Open for community contributions
+MIT License
 
 ## Version History
 
-- **v0.2** (2025): Unified LiveKit-only architecture
+- **v0.3** (2026): Focus on Phaser plugin, validate LiveKit approach
+- **v0.2** (2026): Full game platform (archived - too ambitious)
 - **v0.1** (Archived): Initial Rust/Node specs
