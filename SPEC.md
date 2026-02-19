@@ -249,12 +249,38 @@ export class StateSync {
 ```typescript
 // packages/livekit-phaser/src/Plugin.ts
 
+// Connection states
+export enum ConnectionState {
+  CONNECTING = 'connecting',
+  CONNECTED = 'connected',
+  RECONNECTING = 'reconnecting',
+  DISCONNECTED = 'disconnected'
+}
+
 export class LiveKitPlugin extends Phaser.Plugins.BasePlugin {
   private room: Room | null = null;
   private dataChannels: Map<string, DataChannel> = new Map();
+  private lastSend: Map<string, number> = new Map();
+  private connectionState: ConnectionState = ConnectionState.DISCONNECTED;
+  
+  // Rate limiting config
+  private static MIN_INTERVAL = 16; // ~60fps max send rate
   
   async connect(roomName: string, token: string) {
+    this.setConnectionState(ConnectionState.CONNECTING);
+    
     this.room = new Room();
+    
+    // Handle disconnections
+    this.room.on('disconnected', () => {
+      this.setConnectionState(ConnectionState.RECONNECTING);
+      this.attemptReconnect();
+    });
+    
+    this.room.on('reconnected', () => {
+      this.setConnectionState(ConnectionState.CONNECTED);
+      this.onReconnected();
+    });
     
     // Connect to LiveKit
     await this.room.connect('wss://your-livekit-server.com', token);
@@ -263,6 +289,7 @@ export class LiveKitPlugin extends Phaser.Plugins.BasePlugin {
     await this.setupDataChannels();
     
     // Ready!
+    this.setConnectionState(ConnectionState.CONNECTED);
     this.emit('connected');
   }
   
@@ -283,9 +310,18 @@ export class LiveKitPlugin extends Phaser.Plugins.BasePlugin {
   }
   
   sendUnreliable(topic: string, data: any) {
+    // Rate limit to prevent flooding
+    const now = Date.now();
+    const lastSent = this.lastSend.get(topic) || 0;
+    
+    if (now - lastSent < LiveKitPlugin.MIN_INTERVAL) {
+      return; // Skip - too frequent
+    }
+    
     const channel = this.dataChannels.get(topic);
     if (channel) {
       channel.send(this.encode(topic, data));
+      this.lastSend.set(topic, now);
     }
   }
   
@@ -312,6 +348,82 @@ export class LiveKitPlugin extends Phaser.Plugins.BasePlugin {
   
   async publishCamera() {
     await this.room.localParticipant.setCameraEnabled(true);
+  }
+  
+  // Connection state management
+  private setConnectionState(state: ConnectionState) {
+    this.connectionState = state;
+    this.emit('connection-state', state);
+  }
+  
+  getConnectionState(): ConnectionState {
+    return this.connectionState;
+  }
+  
+  private onReconnected() {
+    // Request full state to catch up after reconnect
+    this.sendReliable('request-state', {});
+    this.emit('reconnected');
+  }
+}
+```
+
+### 4. Phaser Object Pooling
+
+```typescript
+// packages/livekit-phaser/src/ObjectPool.ts
+
+export class RemotePlayerPool {
+  private pool: Phaser.GameObjects.Group;
+  private active: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  
+  constructor(scene: Phaser.Scene, config: PoolConfig) {
+    this.pool = scene.add.group({
+      classType: Phaser.GameObjects.Sprite,
+      maxSize: config.maxPlayers,
+      runChildUpdate: false
+    });
+    
+    // Pre-populate pool
+    for (let i = 0; i < config.maxPlayers; i++) {
+      const sprite = new Phaser.GameObjects.Sprite(scene, 0, 0, config.texture);
+      sprite.setVisible(false);
+      sprite.setActive(false);
+      this.pool.add(sprite);
+    }
+  }
+  
+  getOrCreate(playerId: string): Phaser.GameObjects.Sprite {
+    let sprite = this.active.get(playerId);
+    
+    if (!sprite) {
+      sprite = this.pool.getFirstDead(false);
+      if (sprite) {
+        sprite.setVisible(true);
+        sprite.setActive(true);
+        this.active.set(playerId, sprite);
+      }
+    }
+    
+    return sprite;
+  }
+  
+  release(playerId: string) {
+    const sprite = this.active.get(playerId);
+    if (sprite) {
+      sprite.setVisible(false);
+      sprite.setActive(false);
+      this.pool.killAndHide(sprite);
+      this.active.delete(playerId);
+    }
+  }
+  
+  updatePosition(playerId: string, x: number, y: number, rotation: number) {
+    const sprite = this.getOrCreate(playerId);
+    if (sprite) {
+      sprite.setPosition(x, y);
+      sprite.setRotation(rotation);
+    }
   }
 }
 ```
